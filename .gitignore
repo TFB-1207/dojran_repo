@@ -1,0 +1,33 @@
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.RDataTmp*
+
+# Data files
+*.csv
+*.tsv
+*.rds
+*.xlsx
+*.xls
+*.RData
+
+# Large bioinformatics files you'll likely have
+*.fastq
+*.fastq.gz
+*.bam
+*.sam
+*.fasta
+*.fa
+*.vcf
+
+# General
+*.pdf
+*.zip
+*.tar.gz
+
+# Folders (if you want to ignore entire data folders)
+data/
+output/
+results/

@@ -13,7 +13,9 @@ library(grid)
 library(cowplot)
 library(purrr)
 library(fuzzyjoin)
-
+library(openxlsx)
+library(vegan)
+library(ape)
 
 
 do_0203 <- read_tsv("dojran_shotgun_data.tsv")
@@ -24,6 +26,10 @@ do_df_raw <- do_0203 %>%
 #--------------- load external data of OSL dates and depths
 osl_depth_ex <- read_csv("osl_raw_sorted.csv", col_names = TRUE)
 
+do_age_depth <- read.xlsx("age_depth_sifra.xlsx", sheet = 1, colNames = TRUE) %>%
+  group_by(core) %>%
+  mutate(across(c(age_mean, age_median, age_2.5, age_97.5), ~ round(./1000, 2)))
+
 # need to do some wrangling to get depth ranges ready to merge with our df's
 do_osl_ages <- osl_depth_ex %>%
   group_by(core) %>%
@@ -33,14 +39,11 @@ do_osl_ages <- osl_depth_ex %>%
 
 # ----------------- join osl to do_df_raw -------------------
 do_df_raw <- do_df_raw %>%
-  fuzzy_left_join(
-    do_osl_ages, 
-    by = c("core" = "core",
-           "depth" = "depth_min",
-           "depth" = "depth_max"), 
-    match_fun = list(`==`, `>=`, `<`)
-  ) %>%
-  select(library, core = core.x, depth, depth_min, depth_max, age_ka, db, everything(), -core.y) 
+  left_join(do_age_depth, by = c('core', "depth"))%>%
+  select(library, core, depth, age_mean, db, everything()) %>%
+  group_by(core, depth)
+
+unique(do_df_raw %>% filter(core == "Core DOR 4") %>% pull(age_mean))
 ```
 # Simplifying df's
 To make it easier to work we simplify the df we get from Kevin.
@@ -51,7 +54,7 @@ columns_df_gs <- c(
   "library",
   "core",
   "depth",
-  "age_ka",
+  "age_mean",
   "db", 
   "phylum_name",
   "order_name",
@@ -80,15 +83,16 @@ columns_df_gs <- c(
   "deam3p_frac_family",
   "deam3p_family",
   "ref_C_sum_3p_family",
-  "depth_min",
-  "depth_max"
+  "age_median",
+  "age_2.5",
+  "age_97.5" 
   )
 
 columns_df_gs_fm <- c(
   "library",
   "core",
   "depth",
-  "age_ka",
+  "age_mean",
   "db",
   "phylum_name",
   "order_name",
@@ -119,8 +123,9 @@ columns_df_gs_fm <- c(
   "ref_C_sum_3p_family",
   "sum_phylum_count",
   "sum_order_count",
-  "depth_min",
-  "depth_max"
+  "age_median",
+  "age_2.5",
+  "age_97.5" 
   )
 ```
 # create smaller df's
@@ -133,12 +138,13 @@ do_df_fm_gs <- do_df_raw %>% # so we define the genus data frame (df_gs) from th
   mutate(
     deam5p_frac_genus_family = (deam5p_genus + deam5p_family) / (ref_C_sum_5p_genus + ref_C_sum_5p_family),
     deam3p_frac_genus_family = (deam3p_genus + deam3p_family) / (ref_C_sum_3p_genus + ref_C_sum_3p_family)) %>% #add deamination rate
-  filter(!sum_genus_count < 200) %>% # filter out entries with lower than 100 reads, this low reads = generally unreliable 
+  filter(!sum_genus_count < 100) %>%# filter out entries with lower than 100 reads, this low reads = generally unreliable 
+  slice_max(genus_count_assembly, n = 1, with_ties = FALSE) %>%
   arrange(core, depth, library)
 ```
 
 
-#--------------------------------------- Check genus origin with WCVP identifier -----------------------------
+#--------------------------------------- Contamination check and filter -----------------------------
 ## powo auto check
 Here I want to make a section where we can automatically check for f.e. all the genera in our df if they are native or exotics. And check their origings. This way we can see which genera are f.e. from the Americas which would mark them as obvious modern contamination in older samples. 
 
@@ -167,13 +173,13 @@ do_wcvp_native <- wcvp_dist %>%
   filter(area_code_l3 %in% do_target_area,
          introduced == 0) %>%
   right_join(
-    wcvp_names %>% select(plant_name_id, genus),
+    wcvp_names %>% select(plant_name_id, genus, lifeform_description),
     by = "plant_name_id"
   ) %>%
   select(genus, everything()) %>%
   filter(!is.na(genus),
          !is.na(area_code_l3)) %>%
-  distinct(genus, region, area, area_code_l3)
+  distinct(genus, region, area, area_code_l3, lifeform_description)
 
 # this just gives a more detailed overview which genus is native to which country
 do_wcvp_native_ov <- do_wcvp_native %>%
@@ -185,7 +191,7 @@ do_wcvp_native_ov <- do_wcvp_native %>%
     names_prefix = "native_"
   ) %>%
   mutate(native_any = TRUE)
-  
+
 ```
 
 ## Add native status to df
@@ -207,10 +213,29 @@ do_df_non_nat <- do_df_plant %>% # non native df
 
 non_native <- unique(do_df_non_nat$genus_name)
 
+# We're pretty sure highest read scoring assembly is right one. This because all three contaminants 
 do_df_corn <- do_df_plant %>%
   filter(genus_name %in% c("Zea", "Helianthus", "Nicotiana") ) %>%
-  arrange(core, depth )
+  group_by(core, depth) %>%
+  arrange(core, depth)
 
+do_df_corn_ref <- do_df_corn %>%
+  ungroup() %>%
+  group_by(core) %>%
+  summarise(
+    max_reads          = max(genus_count_assembly, na.rm = TRUE),
+    deam_at_max_count  = deam5p_frac_genus[which.max(genus_count_assembly)],
+    genus_max_count    = genus_name[which.max(genus_count_assembly)],
+    depth_max_count    = depth[which.max(genus_count_assembly)],
+    
+    max_deam           = max(deam5p_frac_genus, na.rm = TRUE),
+    count_at_maxdeam   = genus_count_assembly[which.max(deam5p_frac_genus)],
+    genus_at_maxdeam   = genus_name[which.max(deam5p_frac_genus)],
+    depth_at_maxdeam   = depth[which.max(deam5p_frac_genus)]
+    
+    )
+    
+    
 do_contam_colour <- c(
   "Zea"        = "#F0E143",
   "Helianthus" = "#F08E43",
@@ -242,15 +267,14 @@ do_ter_highN <- do_df_fm_gs %>%
 do_ter_ages <- do_df_plant %>%
   filter(str_detect(core, "DOR")) %>%
   group_by(core, depth) %>%
-  summarise(age_ka = mean(age_ka, na.rm = TRUE))
+  summarise(age_mean = mean(age_mean, na.rm = TRUE))
 
 # based on that make age and depth where we have <1500 CE
-do_1500_ter <- tribble(
-  ~core, ~depth, ~age_ka,
-  "Core DOR 2", 40, 0.650,
-  "Core DOR 3", 118, 1.270,
-  "Core DOR 4", 51, 0.700
-  )
+do_1500_ter <- do_ter_ages %>%
+  filter(age_mean > 0.500) %>%
+  group_by(core) %>%
+  summarise(depth_1500 = min(depth),
+            age_mean = first(age_mean))
 ```
 plot
 ```{r, echo = FALSE}
@@ -267,8 +291,8 @@ do_p_contam_list <- imap(do_cores_corn, function(this_core, core_idx) {
   line_info <- do_1500_ter %>%
     filter(core == this_core)
   
-  line_depth <- line_info %>% pull(depth)
-  line_age <- line_info %>% pull(age_ka)
+  line_depth <- line_info %>% pull('depth_1500')
+  line_age <- line_info %>% pull('age_mean')
   
   p <- ggplot(core_data, aes(x = deam5p_frac_genus_family, y = depth)) +
     # first background points
@@ -322,15 +346,16 @@ do_p_contam_comb <- cowplot::plot_grid(
 do_p_contam_comb
 
 
-ggsave("do_deamr_contam_v_terr2.pdf", plot = do_p_contam_comb, width = 12, height = 10, dpi = 300)
+ggsave("output/do_deamr_contam_v_terr2.pdf", plot = do_p_contam_comb, width = 12, height = 10, dpi = 300)
 ```
 
 
-#----------------- Filter for certain contaminants based on age ------------------
+##-------- Set threshold based on age -----
 We added OSL ages, although fickle, we know that if any of our likely contaminants (corn, tobacco, sunflower), show up in layers older than 500 years ago, we have leaching, since these were not cultivated in Europe before that time. We use this to chek the deamination rate of these known contaminants to see if we can us them as thershold for what is a contaminant. 
 ```{r, echo = FALSE}
 do_df_corn_leach <- do_df_corn %>%
-  filter(age_ka > 0.5) %>%
+  group_by(core) %>%
+  filter(age_mean > 0.5) %>%
   arrange(core, depth)
 
 do_contam_max_deamr <- do_df_corn_leach %>%
@@ -338,10 +363,22 @@ do_contam_max_deamr <- do_df_corn_leach %>%
   summarise(max_deam5p_frac_genus = max(deam5p_frac_genus, na.rm = TRUE))
 
 
+##### This is the set we'll use for PCoA. we 'trust' this set ########
+do_df_plant_ter <- do_df_plant %>%
+  filter(core %in% c("Core DOR 2","Core DOR 3", "Core DOR 4")) 
+
+do_df_pl_tr_cl <- do_df_plant_ter %>%  
+  left_join(do_contam_max_deamr, by = "core")%>%
+  group_by(core) %>%
+  filter( age_mean <=0.5 | deam5p_frac_genus >= max_deam5p_frac_genus) %>%
+  ungroup() %>%
+  group_by(library) %>%
+  arrange(core, depth)
+
 ```
 
-##-------- Now we recreate the deam plots form Kevin and add these thersholds--------------
-### Define reoccuring plot elements, colours etc
+#--------------------------- attempt to create deam plots like Kevin --------------------------
+## Define reoccuring plot elements, colours etc
 ```{r, echo = FALSE}
 # my_theme_min #not made yet but in future good way to work 
 
@@ -365,7 +402,7 @@ db_colours <- c(
 
 ```
 
-### Try recreate Kevin deamination rate plots (standardise this later)
+## Try recreate Kevin deamination rate plots (standardise this later)
 quick try from DS
 ```{r, echo = FALSE}
 # Get unique cores
@@ -402,7 +439,7 @@ do_plots <- imap(count_ranges, function(count_range, range_idx) {
              !db == "bacteria",
              genus_count_assembly >= count_min & genus_count_assembly < count_max)
     # select depth for hline per core
-    hline_val <- do_1500_ter %>% filter(core == this_core) %>% pull(depth)
+    hline_val <- do_1500_ter %>% filter(core == this_core) %>% pull()
     
     p <- ggplot(core_data, aes(x = depth, y = deam5p_frac_genus_family, fill = db, colour = db)) +
       geom_point(alpha = 1, size = 3, shape = 21, colour = "black") +
@@ -512,16 +549,16 @@ do_dor2_deamr
 
 ```
 
-## deam rate vs avg. read length
+#----------------------------- deam rate vs avg. read length------------------------------
 quick plot deam_rate vs avg. read length to see if we can see any patterns.
 ```{r, echo = FALSE}  
 do_site_colour <- c(
-  "Core DOR 2" = "#FFC300",
-  "Core DOR 3" = "#B88B00",
-  "Core DOR 4" = "#755700",
-  "Core DOJ 1/24 center" = "#3793BD",
-  "Core DOJ DEL 3/24/A" = "#374BBD",
-  "Core DOJ DEL 4/24/B" = "#101C6B" 
+  "Core DOR 2" = "#EBE209",
+  "Core DOR 3" = "#D6A85A",
+  "Core DOR 4" = "#452A15",
+  "Core DOJ 1/24 center" = "#71E362",
+  "Core DOJ DEL 3/24/A" = "#30B21F",
+  "Core DOJ DEL 4/24/B" = "#1B6412" 
 )
 
 
@@ -545,35 +582,56 @@ do_df_long <- do_df_fm_gs %>%
   mutate(level = if_else(str_detect(deam_level, "genus"), "genus", "family"))
 
 # set filters
-do_pres_plot_df <- do_df_fm_gs %>%
-  filter(!deam5p_frac_genus < 0.009,
-         !deam5p_frac_family < 0.009,
-         db == "plant"
-         )
+do_pres_plot_df_di <- do_df_raw %>%
+  filter(sum_genus_count > 1)
 
-do_pres_plot_gs <- ggplot(do_pres_plot_df, aes(x = deam5p_frac_genus, y = median_read_length_genus, fill = core, colour = core)) +
+do_n_labels_di <- do_pres_plot_df_di %>%
+  group_by(core) %>%
+  summarise(n = n()) %>%
+  mutate(label = paste0("N = ", n))
+
+do_pres_plot_df_cl <- do_df_raw %>%
+  filter(sum_genus_count > 100)
+
+do_n_labels_cl <- do_pres_plot_df_cl %>%
+  group_by(core) %>%
+  summarise(n = n()) %>%
+  mutate(label = paste0("N = ", n))
+
+do_pres_plot_gs_cl <- ggplot(do_pres_plot_df_cl, aes(x = deam5p_frac_genus, y = median_read_length_genus, fill = core, colour = core)) +
   geom_point(alpha = 1, size = 3, shape = 21, colour = "black") +
   geom_smooth(colour = "red", alpha = 0.4, se = TRUE, level = 0.95, method = "lm", span = 0.9) +
-  scale_y_continuous(limits = c(30,55)) +
+  geom_text(data = do_n_labels_cl, aes(label = label), 
+            x = 0.35, y = 75,  # adjust position as needed
+            inherit.aes = FALSE) +
+  scale_y_continuous(limits = c(30,80)) +
   scale_x_continuous(limits = c(0, 0.4)) +
   scale_colour_manual(values = do_site_colour) +
   scale_fill_manual(values = do_site_colour) +
   labs(
     title = "deam5p_frac_genus_genus vs median_read_length_genus",
-    x = "median_read_length_genus",
-    y = "deam5p_frac_genus"
+    x = "deam5-_frac_genus",
+    y = "median_read_length_genus"
     ) +
   facet_wrap(~core, ncol = 3) +
   theme_classic() +
   theme(legend.position = "none")
 
-do_pres_plot_fm
+do_pres_plot_gs_cl
 
 
-ggsave("do_deamr_readlength_gs.pdf", plot = do_pres_plot_gs, width = 12, height = 10, dpi = 300)
+ggsave("output/Do_deamr_readlength_gs_clean.pdf", plot = do_pres_plot_gs_cl, width = 12, height = 10, dpi = 300)
 
 
 #testest
+
+
+DOR4_test <- do_df_raw %>%
+  filter(core == "Core DOR 4")%>%
+  summarise(depth_max = max(depth, na.rm = TRUE))
+
+DOR4_test
+  
 ```
 
 
@@ -586,5 +644,201 @@ ggsave("do_deamr_readlength_gs.pdf", plot = do_pres_plot_gs, width = 12, height 
 
 
 
+
  
  
+
+#-------------------------------------- beta-analysis ----------------------------------------
+## ---------- normalise Data --------------
+```{r, echo = FALSE}
+do_ter_cl_wide <- do_df_pl_tr_cl %>%
+  group_by(library, genus_name) %>%
+  summarise(reads = sum(sum_genus_count), .groups = "drop") %>%
+  pivot_wider(names_from = genus_name, values_from = reads, values_fill = 0)
+
+do_ter_cl_matrix <- do_ter_cl_wide %>%
+  column_to_rownames("library") %>%
+  as.matrix()
+
+do_ter_cl_matrix_rel <- do_ter_cl_matrix / rowSums(do_ter_cl_matrix)
+```
+##--------- making PCoA ------------
+```{r, echo = FALSE}
+do_ter_cl_dist <- vegdist(do_ter_cl_matrix_rel, method = "bray")
+
+pcoa_ter_cl <- pcoa(do_ter_cl_dist)
+# calculate variance explained. 
+do_var_explained <- 100 * pcoa_ter_cl$values$Relative_eig
+
+# first only select asxis we want to plot (first two) and add right names to pcoa scores
+pcoa_ter_cl_tibble <- as_tibble(pcoa_ter_cl$vectors[,1:2], .name_repair = "minimal") %>%
+  mutate( library = rownames(do_ter_cl_matrix_rel))
+
+# -------------------------------- make meta data ------------------------------
+DOR2_libs <- do_df_pl_tr_cl %>%
+  filter(core == "Core DOR 2") %>%
+  distinct(library)
+DOR3_libs <- do_df_pl_tr_cl %>%
+  filter(core == "Core DOR 3") %>%
+  distinct(library)
+DOR4_libs <- do_df_pl_tr_cl %>%
+  filter(core == "Core DOR 4") %>%
+  distinct(library)
+
+do_pcoa_meta <- pcoa_ter_cl_tibble %>%
+  mutate(
+    core = case_when(
+      library %in% DOR2_libs$library ~ "Core DOR 2",
+      library %in% DOR3_libs$library ~ "Core DOR 3",
+      library %in% DOR4_libs$library ~ "Core DOR 4",
+      TRUE ~ NA_character_
+    )
+  )
+
+# --------------- add meta to pcoa -----------------------
+pcoa_ter_cl_tibble <- pcoa_ter_cl_tibble %>%
+  left_join(do_pcoa_meta %>% select(library, core), by = "library") %>%
+  left_join(do_df_plant_ter %>% ungroup() %>% distinct(library, age_mean), by = "library")
+            
+  
+```
+
+##--- initial pcoa plot ---
+```{r, echo = FALSE}
+
+xlab1 <- sprintf("PCoA 1 (%.1f%%)", do_var_explained[1])
+ylab1 <- sprintf("PCoA 2 (%.1f%%)", do_var_explained[2])
+
+do_pcoa_pl1 <- ggplot(pcoa_ter_cl_tibble, aes(x = Axis.1, y = Axis.2)) +
+  geom_hline(yintercept = 0, color = "grey70", linewidth = 1) +
+  geom_vline(xintercept = 0, color = "grey70", linewidth = 1) +
+  geom_point(aes(fill = core), shape = 21, colour = "black", size = 3) +
+  scale_x_continuous(limits = c(-0.5, 0.5)) +
+  scale_y_continuous(limits = c(-0.5, 0.5)) +
+  geom_label_repel(aes(label = age_mean), size = 3.5) +
+  scale_fill_manual(values = do_site_colour, name = "Site", guide = "legend") +
+  labs(x = xlab1, y = ylab1, title = "a") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme_classic()
+
+do_pcoa_pl1
+
+ggsave("output/Do_pcoa_ter_cl1.pdf", plot = do_pcoa_pl1, width = 8, height = 6, dpi = 300)
+```
+## ------------- adding vectors -----------------------
+```{r, echo = FALSE}
+# get envfit vectors
+do_fit_taxa <- envfit(pcoa_ter_cl$vectors, do_ter_cl_matrix_rel, permutations = 999 )
+
+do_signif_taxa <- scores(do_fit_taxa, display = "vectors") %>%
+  as.data.frame() %>%
+  rownames_to_column("taxon") %>%
+  filter(do_fit_taxa$vectors$pvals < 0.05) %>%
+  mutate(
+    r  = do_fit_taxa$vectors$r[do_fit_taxa$vectors$pvals < 0.05],
+    r2 = r^2,
+    p  = do_fit_taxa$vectors$pvals[do_fit_taxa$vectors$pvals < 0.05]
+  ) %>%
+  arrange(desc(r2)) %>%
+  rename(genus_name = taxon)
+
+```
+
+## ------ add growth form data ------
+```{r, echo = FALSE}
+do_wcvp_native_genera <- do_df_raw %>%
+  ungroup() %>%
+  filter(genus_name %in% do_wcvp_native$genus)%>%
+  distinct(genus_name) %>%
+  left_join(do_wcvp_native %>% select(genus, lifeform_description), by = c("genus_name" = "genus"))
+
+do_growth_form_native <- do_wcvp_native_genera %>%
+  mutate(growth_form = case_when(
+    # trees first
+    str_detect(lifeform_description, "tree")                          ~ "tree",
+    # shrubs
+    str_detect(lifeform_description, "shrub")                         ~ "shrub",
+    # aquatic/wetland
+    str_detect(lifeform_description, "helophyte|hydro|aquatic")       ~ "aquatic/wetland",
+    # climbers
+    str_detect(lifeform_description, "climb|scrambl|liana")           ~ "climber",
+    # grasses/sedges - based on genus since lifeform won't say "grass"
+    genus_name %in% c("Carex", "Phragmites", "Poa", "Bromus", 
+                      "Festuca", "Agrostis", "Holcus", "Alopecurus",
+                      "Lolium", "Hordeum", "Triticum", "Avena", 
+                      "Secale", "Oryza", "Zea", "Sorghum", "Panicum",
+                      "Digitaria", "Echinochloa", "Setaria", "Cynodon",
+                      "Eleusine", "Cyperus", "Schoenoplectus", 
+                      "Eleocharis", "Typha", "Sparganium")             ~ "grass/sedge",
+    # everything else is forb/herb
+    str_detect(lifeform_description, "perennial|annual|biennial")     ~ "forb/herb",
+    TRUE                                                               ~ "unknown"
+  ))
+
+# define priority order (1 = highest priority)
+growth_form_priority <- c(
+  "tree"             = 1,
+  "shrub"            = 2,
+  "grass/sedge"      = 3,
+  "forb/herb"        = 4,
+  "climber"          = 5,
+  "aquatic/wetland"  = 6,
+  "unknown"          = 7
+)
+
+# keep only highest priority growth form per genus
+do_growth_form_native <- do_growth_form_native %>%
+  mutate(priority = growth_form_priority[growth_form]) %>%
+  group_by(genus_name) %>%
+  slice_min(priority, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(-priority)
+
+do_wcvp_genera <- do_df_raw %>%
+  ungroup() %>%
+  filter(db == 'plant') %>%
+  distinct(genus_name) %>%
+  left_join(wcvp_names %>% select(genus, lifeform_description), by = c("genus_name" = "genus"))
+  
+do_growth_form_all <- do_wcvp_genera %>%
+    mutate(growth_form = case_when(
+    # handle NAs and empty strings first
+    is.na(lifeform_description) | lifeform_description == "" ~ "unknown",
+    
+    # trees (before shrub so "shrub or tree" goes to tree... or swap if you prefer shrub)
+    str_detect(lifeform_description, "tree")                          ~ "tree",
+    
+    # shrubs
+    str_detect(lifeform_description, "shrub")                         ~ "shrub",
+    
+    # aquatic/wetland
+    str_detect(lifeform_description, "helophyte|hydro|geophyte")      ~ "aquatic/wetland",
+    
+    # climbers/scramblers/lianas
+    str_detect(lifeform_description, "climb|scrambl|liana|epiphyte")  ~ "climber",
+    
+    # grasses/sedges by genus
+    genus_name %in% c("Carex", "Phragmites", "Poa", "Bromus",
+                      "Festuca", "Agrostis", "Holcus", "Alopecurus",
+                      "Lolium", "Hordeum", "Triticum", "Avena",
+                      "Secale", "Oryza", "Zea", "Sorghum", "Panicum",
+                      "Digitaria", "Echinochloa", "Setaria", "Cynodon",
+                      "Eleusine", "Cyperus", "Schoenoplectus",
+                      "Eleocharis", "Typha", "Sparganium",
+                      "Stuckenia", "Potamogeton")                     ~ "grass/sedge",
+    
+    # forbs/herbs
+    str_detect(lifeform_description, "perennial|annual|biennial|monocarpic") ~ "forb/herb",
+    
+    TRUE ~ "unknown"
+  ))
+
+do_growth_form_all <- do_growth_form_all %>%
+  mutate(priority = growth_form_priority[growth_form]) %>%
+  group_by(genus_name) %>%
+  slice_min(priority, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(-priority)
+
+```
+

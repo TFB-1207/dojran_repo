@@ -842,3 +842,13 @@ do_growth_form_all <- do_growth_form_all %>%
 
 ```
 
+# Check for FISH
+```{r, echo = FALSE}
+do_df_fish <- do_df_raw %>%
+  filter(family_name %in% c("Cyprinidae", "Gobiidae", "Cichlidae", "Characidae", "Loricariidae", 
+                            "Balitoridae", "Serranidae", "Labridae", "Scorpaenidae")) %>%
+  slice_max(genus_count_assembly, n = 1, with_ties = FALSE) %>%
+  select(library, core, depth, age_mean, phylum_name, order_name, family_name, genus_name, genus_count_assembly, sum_genus_count, deam5p_frac_genus, median_read_length_genus)
+
+```
+

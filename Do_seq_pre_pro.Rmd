@@ -16,6 +16,7 @@ library(fuzzyjoin)
 library(openxlsx)
 library(vegan)
 library(ape)
+library(ggrepel)
 
 
 do_0203 <- read_tsv("dojran_shotgun_data.tsv")
@@ -634,6 +635,44 @@ DOR4_test
   
 ```
 
+## ----------- Same figure but universal taxa ---------------------
+```{r, echo = FALSE}
+# find taxa present in all cores
+do_n_cores <- n_distinct(do_df_raw$core)
+
+do_universal_taxa <- do_df_raw %>%
+  filter(sum_genus_count > 1) %>%
+  group_by(taxa_name) %>%
+  summarise(cores_present = n_distinct(core)) %>%
+  filter(cores_present == do_n_cores) %>%
+  pull(taxa_name)
+
+# apply filter 
+do_pres_plot_uni <- do_df_raw %>%
+  filter(taxa_name %in% do_universal_taxa,
+         sum_genus_count > 99)
+
+do_pres_plot_gs_uni <- ggplot(do_pres_plot_uni, aes(x = deam5p_frac_genus, y = median_read_length_genus, fill = core, colour = core)) +
+  geom_point(alpha = 1, size = 3, shape = 21, colour = "black") +
+  geom_smooth(colour = "red", alpha = 0.4, se = TRUE, level = 0.95, method = "lm", span = 0.9) +
+  scale_y_continuous(limits = c(30,80)) +
+  scale_x_continuous(limits = c(0, 0.4)) +
+  scale_colour_manual(values = do_site_colour) +
+  scale_fill_manual(values = do_site_colour) +
+  labs(
+    title = "Universal genera: deamrate vs read length",
+    x = "deam5p_frac_genus",
+    y = "median_read_length_genus"
+  ) +
+  facet_wrap(~core, ncol = 3) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+do_pres_plot_gs_uni
+
+ggsave("output/Do_deamr_readlength_gs100_universal.pdf", plot = do_pres_plot_gs_uni, width = 12, height = 10, dpi = 300)
+```
+
 
 
 
@@ -842,7 +881,7 @@ do_growth_form_all <- do_growth_form_all %>%
 
 ```
 
-# Check for FISH
+# ------------------------------ Check for FISH  -------------------------
 ```{r, echo = FALSE}
 do_df_fish <- do_df_raw %>%
   filter(family_name %in% c("Cyprinidae", "Gobiidae", "Cichlidae", "Characidae", "Loricariidae", 
@@ -852,3 +891,53 @@ do_df_fish <- do_df_raw %>%
 
 ```
 
+
+# -------------------- Library performance check ---------------------------
+```{r, echo = FALSE}
+
+do_lib_summary <- do_df_fm_gs %>%
+  ungroup() %>%
+  group_by(core, library) %>%
+  summarise(
+    depth_mean         = mean(depth, na.rm = TRUE),
+    n_genera          = n_distinct(genus_name),
+    n_genus_reads     = sum(sum_genus_count, na.rm = TRUE),
+    n_family_reads    = sum(sum_family_count, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  group_by(core) %>%
+  mutate(
+    rank_genera      = rank(-n_genera),
+    rank_genus_reads = rank(-n_genus_reads),
+    rank_family_reads = rank(-n_family_reads),
+    # combined rank score across all metrics
+    combined_rank = rank_genera + rank_genus_reads + rank_family_reads
+  ) %>%
+  arrange(core, combined_rank)
+
+do_lib_top3 <- do_lib_summary %>%
+  group_by(core) %>%
+  slice_min(combined_rank, n = 3)
+  
+do_lib_min3 <- do_lib_summary %>%
+  group_by(core) %>%
+  slice_max(combined_rank, n = 3)
+
+do_lib_comb <- do_lib_summary %>%
+  filter(library %in% c(do_lib_top3$library, do_lib_min3$library))
+```
+## show with polts
+```{r, echo = FALSE}
+do_performance_plot <- ggplot(do_lib_comb, aes(x = combined_rank, y = depth_mean, fill = core)) +
+  geom_point(shape = 21, size = 4, colour = "black") +
+  scale_y_reverse(limits = c(0, 180)) +
+  scale_fill_manual(values = do_site_colour) +
+  facet_wrap(~core, ncol = 3) +
+  labs(x = "scored rank", y = "depth", title = "best and worse libs") +
+  theme_classic() +
+  theme(legend.position = "right")
+
+
+do_performance_plot
+ggsave("output/Do_library_performance_comb_rank.pdf", plot = do_performance_plot, width = 10, height = 6, dpi = 300)
+```

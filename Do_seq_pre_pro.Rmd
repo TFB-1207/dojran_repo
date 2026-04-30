@@ -17,6 +17,7 @@ library(openxlsx)
 library(vegan)
 library(ape)
 library(ggrepel)
+library(scico)
 
 
 do_0203 <- read_tsv("dojran_shotgun_data.tsv")
@@ -670,7 +671,40 @@ do_pres_plot_gs_uni <- ggplot(do_pres_plot_uni, aes(x = deam5p_frac_genus, y = m
 
 do_pres_plot_gs_uni
 
-ggsave("output/Do_deamr_readlength_gs100_universal.pdf", plot = do_pres_plot_gs_uni, width = 12, height = 10, dpi = 300)
+ggsave("output/Do_deamr_readlength_gs100_universal_tryout.pdf", plot = do_pres_plot_gs_uni, width = 12, height = 10, dpi = 300)
+
+
+### ben
+
+
+do_pres_plot_gs_uni <- ggplot(do_pres_plot_uni, aes(y = deam5p_frac_genus, x = core, fill = core)) +
+  geom_boxplot() +
+  geom_point(alpha = 1, size = 3, shape = 21, colour = "black") +
+  scale_colour_manual(values = do_site_colour) +
+  scale_fill_manual(values = do_site_colour) +
+  labs(
+    title = "Universal genera: deamrate vs read length",
+    x = "deam5p_frac_genus",
+    y = "median_read_length_genus"
+  ) +
+  theme_classic() +
+  facet_wrap(~taxa_name) +
+  theme(legend.position = "none")
+
+do_pres_plot_gs_uni
+
+
+
+
+do_pres_plot_uni <- do_pres_plot_uni %>%
+  mutate(genus_name = as.factor(genus_name),
+         library    = as.factor(library))
+
+# fit linear model
+do_lm <- lm(deam5p_frac_genus ~ genus_name + library, data = do_pres_plot_uni)
+
+# check summary
+summary(do_lm)
 ```
 
 
@@ -688,7 +722,8 @@ ggsave("output/Do_deamr_readlength_gs100_universal.pdf", plot = do_pres_plot_gs_
  
 
 #-------------------------------------- beta-analysis ----------------------------------------
-## ---------- normalise Data --------------
+## ---------------- TERRESTRIAL CORES ----------------
+### ---------- normalise Data --------------
 ```{r, echo = FALSE}
 do_ter_cl_wide <- do_df_pl_tr_cl %>%
   group_by(library, genus_name) %>%
@@ -701,7 +736,7 @@ do_ter_cl_matrix <- do_ter_cl_wide %>%
 
 do_ter_cl_matrix_rel <- do_ter_cl_matrix / rowSums(do_ter_cl_matrix)
 ```
-##--------- making PCoA ------------
+###--------- making PCoA ------------
 ```{r, echo = FALSE}
 do_ter_cl_dist <- vegdist(do_ter_cl_matrix_rel, method = "bray")
 
@@ -742,7 +777,7 @@ pcoa_ter_cl_tibble <- pcoa_ter_cl_tibble %>%
   
 ```
 
-##--- initial pcoa plot ---
+###--- initial pcoa plot ---
 ```{r, echo = FALSE}
 
 xlab1 <- sprintf("PCoA 1 (%.1f%%)", do_var_explained[1])
@@ -764,7 +799,7 @@ do_pcoa_pl1
 
 ggsave("output/Do_pcoa_ter_cl1.pdf", plot = do_pcoa_pl1, width = 8, height = 6, dpi = 300)
 ```
-## ------------- adding vectors -----------------------
+### ------------- adding vectors -----------------------
 ```{r, echo = FALSE}
 # get envfit vectors
 do_fit_taxa <- envfit(pcoa_ter_cl$vectors, do_ter_cl_matrix_rel, permutations = 999 )
@@ -781,9 +816,12 @@ do_signif_taxa <- scores(do_fit_taxa, display = "vectors") %>%
   arrange(desc(r2)) %>%
   rename(genus_name = taxon)
 
+# we only keep r2> 0.4
+do_signif_taxa_top <- do_signif_taxa %>%
+  filter(r2 > 0.4)
 ```
 
-## ------ add growth form data ------
+### ------ add growth form data ------
 ```{r, echo = FALSE}
 do_wcvp_native_genera <- do_df_raw %>%
   ungroup() %>%
@@ -878,6 +916,95 @@ do_growth_form_all <- do_growth_form_all %>%
   slice_min(priority, n = 1, with_ties = FALSE) %>%
   ungroup() %>%
   select(-priority)
+
+
+# add this to signif taxa
+do_signif_taxa_top <- do_signif_taxa_top %>%
+  left_join(do_growth_form_all %>% select(genus_name, growth_form), by = "genus_name")
+
+# create colours for growth forms
+do_growth_form_colours <- c(
+  "tree"            = "green4",
+  "shrub"           = "#D95F02",
+  "grass/sedge"     = "#B9BD0B",
+  "forb/herb"       = "#E7298A",
+  "climber"         = "#E6553C",
+  "aquatic/wetland" = "#269E78",
+  "unknown"         = "grey40"
+)
+```
+### ---------------- add vectors to pcoa plot ----------------------
+
+```{r, echo=FALSE}
+do_pcoa_pl2 <- do_pcoa_pl1 +
+  geom_segment(
+    data = do_signif_taxa_top,
+    inherit.aes = FALSE,
+    aes(x = 0, y = 0, xend = Axis.1 * 0.4, yend = Axis.2 * 0.4, colour = growth_form), 
+    arrow = arrow(length = unit(0.2, "cm")),
+    linewidth = 1
+      ) +
+  scale_colour_manual(values = do_growth_form_colours, name = "Growth form", guide = "legend")
+
+do_pcoa_pl2
+```
+## ------------ LAKE CORES ------------------------------------
+same process for lakes, still missing ages but we'll use depth for now
+
+### -------------- Normalise data ----------------
+```{r, echo = FALSE}
+do_lac_wide <- do_df_fm_gs %>%
+  filter(str_detect(core, "DOJ")) %>%
+  group_by(library, genus_name) %>%
+  summarise(reads = sum(sum_genus_count), .groups = "drop") %>%
+  pivot_wider(names_from = genus_name, values_from = reads, values_fill = 0)
+
+do_lac_matrix <- do_lac_wide %>% 
+  column_to_rownames("library") %>%
+  as.matrix()
+
+do_lac_matrix_rel <-  do_lac_matrix / rowSums(do_lac_matrix)
+
+```
+### ------------- Calculate distance and PCoA ----------------
+```{r, echo = FALSE}
+do_lac_dist <- vegdist(do_lac_matrix_rel, method = "bray")
+
+do_pcoa_lac <- pcoa(do_lac_dist)
+
+# calculate variance explained
+do_var_expl_lac <- 100* do_pcoa_lac$values$Relative_eig
+
+# Add library, core, depth and age
+do_pcoa_lac_tibble <- as_tibble(do_pcoa_lac$vectors[,1:4], .name_repair = "minimal") %>%
+  mutate(library = rownames(do_lac_matrix_rel)) %>%
+  left_join(do_df_fm_gs %>% filter(str_detect(core, "DOJ")) %>% distinct(library, core), by = "library") %>%
+  left_join(do_df_fm_gs %>% filter(str_detect(core, "DOJ")) %>% ungroup() %>% distinct(library, depth), by = "library")
+#dont have age so can't add it yet
+
+```
+### --------------- Initial PCoA Lake ---------------
+```{r, echo = FALSE} 
+xlab1_lac <- sprintf("PCoA 1 (%.1f%%)", do_var_expl_lac[1])
+ylab1_lac <- sprintf("PCoA 2 (%.1f%%", do_var_expl_lac[2])
+
+do_pcoa_lac1 <- ggplot(do_pcoa_lac_tibble, aes(x = Axis.1, y = Axis.2, shape = core, colour = depth)) +
+  geom_hline(yintercept = 0, color = "grey70", linewidth = 1) +
+  geom_vline(xintercept = 0, color = "grey70", linewidth = 1) +
+  geom_point(size = 3) +
+  scale_colour_scico(palette = "bamako", name = "Depth (cm)", direction = -1) +
+  scale_shape_manual(values = c(16, 17, 15), name = "Core") +
+  scale_x_continuous(limits = c(NA, NA)) +
+  scale_y_continuous(limits = c(NA, NA)) +
+  facet_wrap(~core, ncol = 2) +
+  labs(x = xlab1_lac, y = ylab1_lac) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme_classic()
+
+do_pcoa_lac1
+
+ggsave("output/lake_pcoa1_facet.pdf", plot = do_pcoa_lac1, width = 20, height = 12, dpi = 300)
+
 
 ```
 

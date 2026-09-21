@@ -1,0 +1,143 @@
+---
+title: "do_seq_deam"
+author: "Tom"
+date: "2026-09-21"
+output: pdf_document
+---
+
+# Loading
+First load required libraries and data
+```{r, echo=FALSE}
+library(tidyverse)
+library(patchwork)
+library(ggplot2)
+library(grid)
+library(cowplot)
+library(purrr)
+library(fuzzyjoin)
+library(openxlsx)
+library(vegan)
+library(ape)
+library(ggrepel)
+library(scico)
+library(ggh4x)
+library(slider)
+library(stringr)
+library(plotly)
+library(ggridges)
+```
+
+# --------------------- simplify df and calculate w-mean -------------------
+```{r, echo = FALSE}
+# we only keep lake cores, only streptophyta, simplify core names and make identifier for long table, keep only relevant columns
+do_la_deam <- do_df_fm_gs %>%
+  ungroup() %>%
+  filter(str_detect(core, "DOJ"),
+         phylum_name == 'Streptophyta') %>%
+  mutate(core = str_remove(core, "^Core "),
+         identifier = paste(depth, core, genus_name, sep = "_")) %>%
+  select("identifier", 2:4, "genus_name", "taxa_name", "genus_count_assembly", "sum_genus_count", "deam5p_frac_genus", "deam5p_genus", "ref_C_sum_5p_genus", "deam3p_frac_genus", "deam3p_genus", "ref_C_sum_3p_genus") %>%
+  mutate(
+    deam5p_frac_genus = if_else(ref_C_sum_5p_genus == 0, NA, deam5p_frac_genus),
+    deam3p_frac_genus = if_else(ref_C_sum_3p_genus == 0, NA, deam3p_frac_genus)
+  ) %>%
+  group_by(core, genus_name)
+  
+# now we pivot longer to simplify coding and plotting since we have 3' and 5' deam which can now be combined. 
+#weighted mean is calculated and z score of over 3 is flagged as an outlier 
+do_la_deam_long <- do_la_deam %>%
+  pivot_longer(c(deam3p_frac_genus, deam5p_frac_genus),
+               names_to = "end", values_to = "frac") %>%
+  group_by(core, depth, end) %>%
+  mutate(
+    w_mean = weighted.mean(frac, genus_count_assembly, na.rm = TRUE), 
+    w_sd = sqrt(sum(genus_count_assembly * (frac - w_mean)^2, na.rm = TRUE) / sum(genus_count_assembly, na.rm = TRUE)),
+    z_w = (frac - w_mean) / w_sd, 
+    outlier = abs(z_w) > 3
+  )
+
+``` 
+# -------------- plot deam plots with outlier indicators ---------------------
+## ----------- for this we first make a fucntion to plot over all cores ----------
+```{r, echo = FALSE}
+# make function
+make_deam_plot <- function(dat, core_name) {
+  plot_ly() %>%
+  add_markers(
+    data = dat,
+    x = ~depth,
+    y = ~frac,
+    color = ~end,
+    symbols = c("circle", "x"),
+    symbol = ~outlier,
+    size = ~ifelse(outlier, 12, 8),
+    text = ~paste(
+      "identifier:", identifier,
+      "<br>depth:", depth,
+      "<br>", end, ":", round(frac, 3),
+      "<br>Weighted Z:", round(z_w, 2),
+      "<br>Outlier:", outlier
+    ),
+    hoverinfo = "text"
+  ) %>%
+  layout(
+  title  = core_name,
+  xaxis  = list(title = "Depth"),
+  yaxis  = list(title = "Deamination fraction (genus)"),
+  legend = list(title = list(text = "Series"))
+)
+
+}
+ # apply function over list of plots
+plots <- list()
+for (a_core in unique(do_la_deam_long$core)) {
+  plots[[a_core]] <- make_deam_plot(filter(do_la_deam_long, core == a_core), a_core)
+}
+
+plots
+```
+
+# ---------------- save outliers ----------------
+We only save outliers with negative z-score, since they have lower deamination than the 'normal'. save as .csv file to later call upon if we need to remove them for further analysis 
+```{r, echo = FALSE}
+do_la_outliers <- do_la_deam_long %>%
+  filter(z_w < -2.99)
+write.csv(do_la_outliers, "output/outliers_DOJ.csv", row.names = FALSE)
+
+```
+
+# ---------------------- Ridge Plots
+now we make the ridge plots for a visual inspection of the deam distribution curves. shows if damage is consistent over depths, long tails towards low values indicate contamination, shows shift in deam over depth. Tells us if our z-score thing is workable since our approach works best if we have bell-curves. 
+
+```{r, echo = FALSE}
+make_ridge_plot <- function(dat, core_name) {
+  ggplot(
+    dat,
+    aes(x = frac, y = factor(depth), fill = end, weight = genus_count_assembly)
+  ) +
+    geom_density_ridges(
+      alpha = 0.7,
+      scale = 3,
+      rel_min_height = 0.01,
+      color = "white"
+    ) +
+    labs(
+      x = "Deamination fraction (genus)",
+      y = "Depth",
+      fill = "End",
+      title = paste("Weighted distribution of deamination per depth:", core_name)
+    ) +
+    theme_minimal()
+}
+
+ridge_plots <- list()
+for (a_core in unique(do_la_deam_long$core)) {
+  ridge_plots[[a_core]] <- make_ridge_plot(
+    filter(do_la_deam_long, core == a_core),
+    a_core
+  )
+}
+
+ridge_plots
+```
+

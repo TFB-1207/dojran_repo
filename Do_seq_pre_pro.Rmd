@@ -1,5 +1,5 @@
 ---
-title: "Do_seq_pre_pro"
+title: "Do_seda_general"
 output: html_document
 ---
 
@@ -18,11 +18,14 @@ library(vegan)
 library(ape)
 library(ggrepel)
 library(scico)
+library(ggh4x)
+library(slider)
+```
+loading data
+```{r, echo = FALSE}
+do_0926 <- read_tsv("input/dojran_data_260917.tsv")
 
-
-do_0203 <- read_tsv("dojran_shotgun_data.tsv")
-
-do_df_raw <- do_0203 %>%
+do_df_raw <- do_0926 %>%
   select(library, core, depth, db, everything())
 
 #--------------- load external data of OSL dates and depths
@@ -43,10 +46,12 @@ do_osl_ages <- osl_depth_ex %>%
 do_df_raw <- do_df_raw %>%
   left_join(do_age_depth, by = c('core', "depth"))%>%
   select(library, core, depth, age_mean, db, everything()) %>%
+  filter(!genus_count_assembly < 10) %>% 
   group_by(core, depth)
 
-unique(do_df_raw %>% filter(core == "Core DOR 4") %>% pull(age_mean))
+unique(do_df_raw %>% filter(core == "Core DOJ DEL 3/24/A") %>% pull(age_mean))
 ```
+
 # Simplifying df's
 To make it easier to work we simplify the df we get from Kevin.
 I'll make multiple, df_genus, df_genus_family etc. but for now only focus on genus data, so we only extract data from the df_raw which is relevant for the df_gs (genus dataframe). 
@@ -140,13 +145,26 @@ do_df_fm_gs <- do_df_raw %>% # so we define the genus data frame (df_gs) from th
   mutate(
     deam5p_frac_genus_family = (deam5p_genus + deam5p_family) / (ref_C_sum_5p_genus + ref_C_sum_5p_family),
     deam3p_frac_genus_family = (deam3p_genus + deam3p_family) / (ref_C_sum_3p_genus + ref_C_sum_3p_family)) %>% #add deamination rate
-  filter(!sum_genus_count < 100) %>%# filter out entries with lower than 100 reads, this low reads = generally unreliable 
+  filter(!genus_count_assembly < 100) %>%# filter out entries with lower than 100 reads, this low reads = generally unreliable 
   slice_max(genus_count_assembly, n = 1, with_ties = FALSE) %>%
   arrange(core, depth, library)
+
+df_test <- do_df_fm_gs %>%
+  filter(!sum_genus_count < 200) %>%
+  ungroup() %>%
+  group_by(library) %>%
+  summarise(
+    genus_reads = sum(sum_genus_count, na.rm = TRUE),
+    library = first(library)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    average_reads = mean(genus_reads, na.rm = TRUE)
+  )
 ```
 
 
-#--------------------------------------- Contamination check and filter -----------------------------
+#------------------------------- Contamination check and filter --------------------------
 ## powo auto check
 Here I want to make a section where we can automatically check for f.e. all the genera in our df if they are native or exotics. And check their origings. This way we can see which genera are f.e. from the Americas which would mark them as obvious modern contamination in older samples. 
 
@@ -725,8 +743,8 @@ summary(do_lm)
 ## ---------------- TERRESTRIAL CORES ----------------
 ### ---------- normalise Data --------------
 ```{r, echo = FALSE}
-do_ter_cl_wide <- do_df_pl_tr_cl %>%
-  group_by(library, genus_name) %>%
+do_ter_cl_wide <- river_select %>%
+  group_by(core, genus_name) %>%
   summarise(reads = sum(sum_genus_count), .groups = "drop") %>%
   pivot_wider(names_from = genus_name, values_from = reads, values_fill = 0)
 
@@ -786,11 +804,11 @@ ylab1 <- sprintf("PCoA 2 (%.1f%%)", do_var_explained[2])
 do_pcoa_pl1 <- ggplot(pcoa_ter_cl_tibble, aes(x = Axis.1, y = Axis.2)) +
   geom_hline(yintercept = 0, color = "grey70", linewidth = 1) +
   geom_vline(xintercept = 0, color = "grey70", linewidth = 1) +
-  geom_point(aes(fill = core), shape = 21, colour = "black", size = 3) +
-  scale_x_continuous(limits = c(-0.5, 0.5)) +
-  scale_y_continuous(limits = c(-0.5, 0.5)) +
-  geom_label_repel(aes(label = age_mean), size = 3.5) +
-  scale_fill_manual(values = do_site_colour, name = "Site", guide = "legend") +
+  geom_point(aes(fill = age_mean), shape = 21, colour = "black", size = 3) +
+  scale_x_continuous() +
+  scale_y_continuous() +
+  #geom_label_repel(aes(label = age_mean), size = 3.5) +
+  scale_fill_scico(palette = "bamako", name = "age (ky)", direction = -1) +
   labs(x = xlab1, y = ylab1, title = "a") +
   theme(plot.title = element_text(hjust = 0.5)) +
   theme_classic()
@@ -928,7 +946,7 @@ do_growth_form_colours <- c(
   "shrub"           = "#D95F02",
   "grass/sedge"     = "#B9BD0B",
   "forb/herb"       = "#E7298A",
-  "climber"         = "#E6553C",
+  "climber"         = "purple3",
   "aquatic/wetland" = "#269E78",
   "unknown"         = "grey40"
 )
@@ -950,11 +968,34 @@ do_pcoa_pl2
 ```
 ## ------------ LAKE CORES ------------------------------------
 same process for lakes, still missing ages but we'll use depth for now
+### --------------------- Simplify data for lake PCoA ---------------------------------
+```{r, echo = FALSE}
+age_breaks <- c(-0.05, 0.120, 0.570, 1.1, 1.4, 1.8, 2.4)
+age_labels <- c("0-0.12 kya", "0.12-0.57 kya", "0.57-1.1 kya", "1.1-1.4 kya", "1.4-1.8 kya", "1.8-2.4 kya")
+
+
+do_lake_merge <- do_df_lake %>%
+  filter(str_detect(core, "DOJ"),
+         db == "plant") %>%
+  mutate(
+    age_range = cut(age_mean, breaks = age_breaks, labels = age_labels, include.lowest = TRUE)
+  ) %>%
+  group_by(core, genus_name, age_range) %>%
+  summarise(
+    sum_genus_count_assembly = sum(genus_count_assembly, na.rm = TRUE),
+    sum_genus_count = sum(sum_genus_count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(core, age_range)
+```
 
 ### -------------- Normalise data ----------------
 ```{r, echo = FALSE}
-do_lac_wide <- do_df_fm_gs %>%
-  filter(str_detect(core, "DOJ")) %>%
+# Here we can use normal lake data or merged one. check output names to see which is which 
+
+do_lac_wide <- do_lake_merge %>%
+  filter(str_detect(core, "DOJ"),
+         db == "plant") %>%
   group_by(library, genus_name) %>%
   summarise(reads = sum(sum_genus_count), .groups = "drop") %>%
   pivot_wider(names_from = genus_name, values_from = reads, values_fill = 0)
@@ -978,7 +1019,7 @@ do_var_expl_lac <- 100* do_pcoa_lac$values$Relative_eig
 # Add library, core, depth and age
 do_pcoa_lac_tibble <- as_tibble(do_pcoa_lac$vectors[,1:4], .name_repair = "minimal") %>%
   mutate(library = rownames(do_lac_matrix_rel)) %>%
-  left_join(do_df_fm_gs %>% filter(str_detect(core, "DOJ")) %>% distinct(library, core), by = "library") %>%
+  left_join(do_df_fm_gs %>% filter(str_detect(core, "DOJ")) %>% distinct(library, core, age_mean), by = "library") %>%
   left_join(do_df_fm_gs %>% filter(str_detect(core, "DOJ")) %>% ungroup() %>% distinct(library, depth), by = "library")
 #dont have age so can't add it yet
 
@@ -988,18 +1029,17 @@ do_pcoa_lac_tibble <- as_tibble(do_pcoa_lac$vectors[,1:4], .name_repair = "minim
 xlab1_lac <- sprintf("PCoA 1 (%.1f%%)", do_var_expl_lac[1])
 ylab1_lac <- sprintf("PCoA 2 (%.1f%%", do_var_expl_lac[2])
 
-do_pcoa_lac1 <- ggplot(do_pcoa_lac_tibble, aes(x = Axis.1, y = Axis.2, shape = core, colour = depth)) +
+do_pcoa_lac1 <- ggplot(do_pcoa_lac_tibble, aes(x = Axis.1, y = Axis.2)) +
   geom_hline(yintercept = 0, color = "grey70", linewidth = 1) +
   geom_vline(xintercept = 0, color = "grey70", linewidth = 1) +
-  geom_point(size = 3) +
-  scale_colour_scico(palette = "bamako", name = "Depth (cm)", direction = -1) +
-  scale_shape_manual(values = c(16, 17, 15), name = "Core") +
+  geom_point(aes(fill = age_mean), size = 3, shape = 21, colour = "black") +
+  scale_fill_scico(palette = "bamako", name = "age (ky)", direction = -1) +
   scale_x_continuous(limits = c(NA, NA)) +
   scale_y_continuous(limits = c(NA, NA)) +
   facet_wrap(~core, ncol = 2) +
   labs(x = xlab1_lac, y = ylab1_lac) +
-  theme(plot.title = element_text(hjust = 0.5)) +
-  theme_classic()
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
 
 do_pcoa_lac1
 
@@ -1007,6 +1047,144 @@ ggsave("output/lake_pcoa1_facet.pdf", plot = do_pcoa_lac1, width = 20, height = 
 
 
 ```
+
+### -------------------- Adding vectors to Lake PCoA ---------------
+```{r, echo = FALSE}
+# get envfit vectors 
+do_fit_taxa_lac <- envfit(do_pcoa_lac$vectors, do_lac_matrix_rel, permutations = 999)
+
+do_signif_taxa_lac <- scores(do_fit_taxa_lac, display = "vectors") %>%
+  as.data.frame() %>%
+  rownames_to_column("taxon") %>%
+  filter(do_fit_taxa_lac$vectors$pvals < 0.05) %>%
+  mutate(
+    r  = do_fit_taxa_lac$vectors$r[do_fit_taxa_lac$vectors$pvals < 0.05],
+    r2 = r^2,
+    p  = do_fit_taxa_lac$vectors$pvals[do_fit_taxa_lac$vectors$pvals < 0.05]
+  ) %>%
+  arrange(desc(r2)) %>%
+  rename(genus_name = taxon)
+
+# only keep with r2 > 0.4
+do_signif_taxa_lac_top <- do_signif_taxa_lac %>%
+  filter(r2 > 0.4)
+#note only Phragmites and Salix have r2 above 0.4, for now we'll do pcoa with everything. 
+
+```
+### ----------- Add growth forms -----------------------
+```{r, echo = FALSE}
+do_signif_taxa_lac <- do_signif_taxa_lac %>%
+  left_join(do_growth_form_all %>% select(genus_name, growth_form), by = "genus_name")
+
+do_signif_taxa_lac_top <- do_signif_taxa_lac_top %>%
+  left_join(do_growth_form_all %>% select(genus_name, growth_form), by = "genus_name")
+
+# colours for growth forms are defined in seciton for pcoa terrestrial under do_growth_form_colours
+```
+### ------------ add vectors to PCoA plot -------------
+```{r, echo = FALSE}
+do_pcoa_lac2 <- do_pcoa_lac1 +
+  geom_segment(
+    data = do_signif_taxa_lac,
+    inherit.aes = FALSE,
+    aes(x = 0, y = 0, xend = Axis.1 * 0.4, yend = Axis.2 * 0.4, colour = growth_form),
+    arrow = arrow(length = unit(0.2, "cm")),
+    linewidth = 1
+  ) +
+  geom_text_repel(
+    data = do_signif_taxa_lac,
+    inherit.aes = FALSE,
+    aes(x = Axis.1 * 0.4, y = Axis.2 * 0.4, label = genus_name, colour = growth_form),
+    size = 3
+  ) +
+  scale_colour_manual(values = do_growth_form_colours, name = "Growth form")
+
+do_pcoa_lac2
+ggsave("output/lake_pcoa2_vectors.pdf", plot = do_pcoa_lac2, width = 20, height = 12, dpi = 300)
+```
+### --------------------- Simplify data for lake PCoA ---------------------------------
+```{r, echo = FALSE}
+age_breaks <- c(-0.05, 0.120, 0.570, 1.1, 1.4, 1.8, 2.4)
+age_labels <- c("0-0.12 kya", "0.12-0.57 kya", "0.57-1.1 kya", "1.1-1.4 kya", "1.4-1.8 kya", "1.8-2.4 kya")
+
+
+do_lake_merge <- do_df_lake %>%
+  mutate(
+    age_range = cut(age_mean, breaks = age_breaks, labels = age_labels, include.lowest = TRUE)
+  ) %>%
+  group_by(core, genus_name, age_range) %>%
+  summarise(
+    sum_genus_count_assembly = sum(genus_count_assembly, na.rm = TRUE),
+    sum_genus_count = sum(sum_genus_count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(core, age_range)
+```
+
+
+## ---------------------- Heatmap Lake attempt ---------------------------
+```{r, echo = FALSE}
+# relative abundance per core
+
+do_heatmap_df <- do_df_plant_ter %>%
+  filter(db == "plant") %>%
+  distinct(core, depth, age_mean, library, genus_name, family_name, order_name, sum_genus_count) %>%
+  group_by(core, depth, genus_name, family_name, order_name) %>%
+  summarise(sum_genus_count = sum(sum_genus_count, na.rm = TRUE), .groups = "drop") %>%
+  group_by(core, depth) %>%
+  mutate(rel_abund = sum_genus_count / sum(sum_genus_count, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(rel_abund_bin = cut(rel_abund * 100,
+                             breaks = c(0, 1, 2, 5, 10, 25, 50, 100),
+                             labels = c("0-1%", "1-2%", "2-5%", "5-10%", "10-25%", "25-50%", "50-100%"),
+                             include.lowest = TRUE),
+         depth = as.numeric(depth))
+
+# order genera by order then family
+genus_order <- do_heatmap_df %>%
+  distinct(genus_name, family_name, order_name) %>%
+  arrange(order_name, family_name, genus_name) %>%
+  pull(genus_name)
+
+# *** MISSING BLOCK - add this here ***
+do_heatmap_df <- do_heatmap_df %>%
+  mutate(
+    genus_name   = factor(genus_name, levels = genus_order),
+    family_name  = factor(family_name, levels = unique(family_name[order(order_name, family_name)])),
+    genus_nested = paste(genus_name, family_name, sep = "|")  # key line!
+  )
+# depth as factor for equal binning
+do_heatmap_df <- do_heatmap_df %>%
+  mutate(depth_f = factor(depth, levels = sort(unique(depth))))
+
+# plot - use genus_nested as x instead of genus_name
+do_heatmap_lac <- ggplot(do_heatmap_df, aes(x = genus_name, y = depth_f, fill = rel_abund_bin)) +
+  geom_tile(colour = "grey90", linewidth = 0.3) +
+  scale_fill_scico_d(palette = "bamako", name = "Relative\nabundance", direction = -1) +
+  scale_y_discrete(limits = rev) +
+  facet_nested(core ~ family_name, 
+               scales = "free", space = "free",
+               strip = strip_nested(bleed = TRUE)) +
+  labs(x = NULL, y = "Depth (cm)") +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 9),
+    axis.text.y  = element_text(size = 8),
+    strip.text.x = element_text(size = 9, angle = 90, hjust = 0),
+    strip.text.y = element_text(size = 9, face = "bold"),
+    strip.background.x = element_blank(),
+    strip.background.y = element_blank(),
+    strip.placement = "outside"
+  )
+
+do_heatmap_lac
+
+ggsave("output/terrestrial_heatmap.pdf", plot = do_heatmap_lac, width = 18, height = 11, dpi = 300)
+```
+
+
+
+
 
 # ------------------------------ Check for FISH  -------------------------
 ```{r, echo = FALSE}
@@ -1067,4 +1245,230 @@ do_performance_plot <- ggplot(do_lib_comb, aes(x = combined_rank, y = depth_mean
 
 do_performance_plot
 ggsave("output/Do_library_performance_comb_rank.pdf", plot = do_performance_plot, width = 10, height = 6, dpi = 300)
+```
+
+# -------------- contamination check river using Lake ---------------
+## ----------- make df scoring likelyhood of contamination -------------
+```{r, echo = FALSE}
+do_df_plant <- do_df_plant %>%
+  mutate(location = case_when(str_detect(core, "DOR") ~ "river",
+                              str_detect(core, "DOJ") ~ "lake",
+                              TRUE ~ NA_character_)) 
+# try and pull genera occuring both in lake and river cores
+do_la_ri_uni_gs <- do_df_plant %>%
+  filter(!is.na(location)) %>%  # Remove rows with NA location
+  group_by(genus_name) %>%
+  filter(n_distinct(location) == 2) %>%  # Keep only genera in both locations 
+  group_by(core, genus_name) %>%
+  ungroup()
+
+# Step 1: separate lake and river
+lake_data_uni <- do_la_ri_uni_gs %>% filter(location == "lake")
+river_data_uni <- do_la_ri_uni_gs %>% filter(location == "river")
+
+# Step 2: for each river entry, find lake entries of same genus within +/- 0.05 kya
+window <- 0.10  # adjust this if needed
+
+do_contam_score <- river_data_uni %>%
+  rowwise() %>%
+  mutate(
+    lake_matches = list(
+      lake_data_uni %>%
+        filter(genus_name == .data$genus_name,
+               age_mean >= .data$age_mean - window,
+               age_mean <= .data$age_mean + window)
+    ),
+    lake_n         = nrow(lake_matches),
+    lake_deam_mean = ifelse(lake_n > 0, mean(lake_matches$deam5p_frac_genus, na.rm = TRUE), NA),
+    deam_rel       = (deam5p_frac_genus - lake_deam_mean) / lake_deam_mean,
+    contamination = case_when(
+  is.na(lake_deam_mean)       ~ NA_character_,
+  deam_rel >= -0.10           ~ "--",  # river within 10% below or higher
+  deam_rel >= -0.25           ~ "-",   # 10-25% lower
+  deam_rel >= -0.50           ~ "+",   # 25-50% lower
+  deam_rel <  -0.50           ~ "++"   # more than 50% lower
+),
+    contamination = factor(contamination, levels = c("--", "-", "+", "++"))
+  ) %>%
+  ungroup() %>%
+  select(-lake_matches)
+
+do_contam_select  <-  do_contam_score %>%
+  filter(contamination %in% c("-", "--"))
+write_csv(do_contam_select, "output/river_select2.csv")
+# ---------------------------- new approach ---------
+
+
+# lake lookup table
+lakes <- do_la_ri_uni_gs %>%
+  filter(location == "lake") %>%
+  select(
+    core,
+    genus_name,
+    lake_age_mean = age_mean,
+    lake_deam_value = deam5p_frac_genus,
+    genus_count_assembly
+  )
+
+# river rows with unique ID
+rivers <- do_la_ri_uni_gs %>%
+  filter(location == "river") %>%
+  mutate(row_id = row_number())
+
+# compute lake mean for each river row
+river_vals <- rivers %>%
+  left_join(lakes, by = "genus_name") %>%
+  mutate(
+    age_match =
+      lake_age_mean >= age_mean - window &
+      lake_age_mean <= age_mean + window
+  ) %>%
+  group_by(row_id) %>%
+  summarise(
+    lake_deam = if (any(age_match, na.rm = TRUE)) {
+      mean(lake_deam_value[age_match], na.rm = TRUE)
+    } else {
+      NA_real_
+    },
+    .groups = "drop"
+  )
+
+# final scored dataframe
+river_scored <- rivers %>%
+  left_join(river_vals, by = "row_id") %>%
+  mutate(
+    deam_rel = (deam5p_frac_genus - lake_deam) / lake_deam,
+
+    contamination = case_when(
+      is.na(lake_deam) ~ NA_character_,
+      deam_rel >= -0.10 ~ "--",
+      deam_rel >= -0.25 ~ "-",
+      deam_rel >= -0.50 ~ "+",
+      TRUE ~ "++"
+    ),
+
+    contamination = factor(
+      contamination,
+      levels = c("--", "-", "+", "++")
+    )
+  ) %>%
+  select(-row_id)
+
+river_scored <- river_scored %>%
+  select(core, age_mean, genus_name, deam5p_frac_genus, lake_deam, deam_rel, genus_count_assembly, contamination)
+
+river_select <- river_scored %>%
+  filter(., contamination %in% c("--", "-"))
+
+# --------------- quick plot ------------------------
+ggplot(river_select,
+       aes(x = age_mean,
+           y = deam5p_frac_genus,
+           color = contamination)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_classic() +
+  labs(
+    x = "Age",
+    y = "deam5p_frac_genus",
+    color = "Contamination"
+  )
+
+```
+
+## -------------- re-add data -----------------------
+So we now only use genera that are in both river and lake cores. We can try and put data back from our original df if it has a deaminaiton rate which is in a certain range of what we think of as real signals based on the lake comparisons. However this varies quite a bit so we make an envelope based on f.e. 10-90% intervals. see what happens, this is very taxa specific.
+```{r, echo = FALSE}
+
+
+# rolling deam envelope through time
+deam_ref <- river_select %>%
+  mutate(
+    deam_mean = slide_dbl(
+      deam5p_frac_genus,
+      ~ mean(.x, na.rm = TRUE),
+      .before = 20,
+      .after = 20
+    ),
+
+    deam_sd = slide_dbl(
+      deam5p_frac_genus,
+      ~ sd(.x, na.rm = TRUE),
+      .before = 20,
+      .after = 20
+    ),
+
+    n_local = slide_int(
+      deam5p_frac_genus,
+      ~ sum(!is.na(.x)),
+      .before = 20,
+      .after = 20
+    ),
+
+    deam_se = deam_sd / sqrt(n_local),
+
+    deam_low = deam_mean - deam_se,
+    deam_high = deam_mean + deam_se
+  ) %>%
+  select(age_mean, deam_low, deam_high)
+
+# add nearest envelope to all plant data
+# score all plant data
+plant_scored <- do_df_plant %>%
+  filter(location == "river",
+         genus_count_assembly > 200) %>%
+  rowwise() %>%
+  mutate(
+    nearest_idx = which.min(abs(deam_ref$age_mean - age_mean)),
+
+    deam_low = deam_ref$deam_low[nearest_idx],
+    deam_high = deam_ref$deam_high[nearest_idx],
+
+    authentic_like =
+      deam5p_frac_genus >= deam_low &
+      deam5p_frac_genus <= deam_high
+  ) %>%
+  ungroup()
+
+```
+
+## ----------- create excel files for manual check -----------------------
+```{r, echo = FALSE}
+# get unique river cores
+river_cores <- unique(river_data_uni$core)
+
+# create a workbook
+wb <- createWorkbook()
+
+
+for(this_core in river_cores) {
+  
+  # get river genera and ages for this core
+  river_core_data <- do_la_ri_uni_gs %>%
+    filter(core == this_core)
+  
+  # get unique genus + age combinations from this river core
+  river_genus_ages <- river_core_data %>%
+    distinct(genus_name, age_mean)
+  
+  # filter lake data matching genus and age window
+  lake_matched <- do_la_ri_uni_gs %>%
+    filter(location == "lake") %>%
+    inner_join(river_genus_ages %>% rename(age_river = age_mean),
+               by = "genus_name") %>%
+    filter(age_mean >= age_river - window,
+           age_mean <= age_river + window) %>%
+    select(-age_river) %>%
+    distinct()
+  
+  # bind and write
+  combined <- bind_rows(river_core_data, lake_matched) %>%
+    arrange(genus_name, age_mean)
+  
+  sheet_name <- str_remove(this_core, "Core ")
+  addWorksheet(wb, sheet_name)
+  writeData(wb, sheet_name, combined)
+}
+
+saveWorkbook(wb, "output/river_select_comparison.xlsx", overwrite = TRUE)
+
 ```

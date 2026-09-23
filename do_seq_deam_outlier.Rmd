@@ -1,9 +1,13 @@
 ---
-title: "do_seq_deam"
+title: "do_seq_deam_outliers"
 author: "Tom"
 date: "2026-09-21"
 output: pdf_document
 ---
+# Deamination outlier script
+This script flags and stores assemblies which show suspicious (z score < -3) deamination rates. Its a across depth, weighted mean comparison. So assemlbies with more reads weigh heavier on the mean 'normal' deamination value at that depth. The interactive plotly plots show which assemblies are considered outliers (cross). Only the assemblies with a negative z-score crossing our threshold are considered contamination since higher deamination values indicate older material. 
+
+The ridge plots serve as a way to visually check the deamination rate across depths. Long tails and skewed distributions are indications that something suss is going on.
 
 # Loading
 First load required libraries and data

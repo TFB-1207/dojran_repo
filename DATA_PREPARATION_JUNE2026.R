@@ -36,16 +36,16 @@ library(ggridges)
 # REMOVES AQUATIC TAXA (BECAUSE OF OVERABUNDANCE ISSUES)
 
 # Set working directory
-setwd("C:/Users/kleij057/OneDrive - Wageningen University & Research/DATA/sedaDNA/sedaDNAjune")
+#setwd("")
 
 # Load sedaDNA data
-nepaldat <- readr::read_tsv("260623_taxa_out.tsv")
+nepaldat <- readr::read_tsv("C:/projects/repositories/zo_repo/260623_taxa_out.tsv")
 
 # BUG: This needs to be moved from indexing to colnames
 #nepaldat <- nepaldat[,c(1:4,7:70)]
 
 #Load own sample labels
-labels <- read.csv2("Lib_id2sample_id_new.csv", sep = ",")
+labels <- read.csv2("C:/projects/repositories/zo_repo/Lib_id2sample_id_new.csv", sep = ",")
 
 # Add own labels to your data
 # Rename the column

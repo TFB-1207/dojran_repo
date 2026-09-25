@@ -1,0 +1,279 @@
+---
+title: "do_seq_bleedover_check"
+author: "Tom"
+date: "2026-09-23"
+output: pdf_document
+---
+
+# Bleedover check
+This script functions to pick up on assemlbies which show suspicious behaviour by maintaining consistent ratio's over depth. Meaning f.e. two genera show the same ratio throughout the whole core. This is suspect since real plants likelhy would vary over time. This similar ratio over a large depth indicates there is bleed-over from one to the other, so likely it is one single plant that produces the reads, not the two. To approach this a Pearson correlation test is run for every pair of genera. Genera which have a strong correlation (R^2 > 0.8) and are within the same order are plotted and saved to a .pdf for later inspection. The final verdict on bleed-over or not is done manually by inspecting the plots. 
+
+
+# Load packages
+```{r, echo = False}
+library(readr)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(factoextra)
+library(vegan)
+library(viridis)
+library(ggfortify)
+library(plotly)
+library(dplyr)
+library(tidyr)
+library(janitor)
+library(readxl)
+library(forcats)
+library(ggplot2)
+library(ggdendro)
+library(vegan)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggforce)     
+library(tidytext)
+library(ggridges)
+
+```
+
+# Load data
+Our data frame is already linked to age_depth model and simplified in Do_seq_pre_pro script.There we also already removed the duplicate genera, so but if you're working on species level you should rebuilid your df from the do_df_raw df. 
+```{r, echo = FALSE}
+# select phyla of interest _bo is bleed-over
+# This df already is filtered for low read counts
+do_df_bleed <- do_df_fm_gs %>%
+  ungroup() %>%
+  filter(phylum_name == "Streptophyta",
+         str_detect(core, "DOJ")) %>%
+  mutate(core = str_remove(core, "^Core ")) %>% # get rid of Core 
+  select(core, depth, age_mean, phylum_name, order_name, family_name, genus_name, taxa_name,
+         genus_count_assembly)  # only keep relevant colums
+
+# we also make a df without filtering for the low read counts
+do_df_bleed_raw <- do_df_raw %>%
+  ungroup() %>%
+  group_by(core, depth, genus_name) %>%
+  select(core, depth, age_mean, phylum_name, order_name, family_name, genus_name, taxa_name, genus_count_assembly) %>%
+  filter(phylum_name == "Streptophyta",
+         str_detect(core, "DOJ")) %>%
+  mutate(core = str_remove(core, "^Core ")) %>% # get rid of Core 
+  slice_max(order_by = genus_count_assembly, n = 1, with_ties= FALSE) %>%
+  ungroup()
+  
+  
+
+```
+----------------------------- Inspect and select bleed-over taxa --------------
+
+Here only use unfiltered readcount datset (so do_df_bleed_raw)
+
+---------------------------------------------------------------------------------
+## 0. Order by taxonomy
+We make a factored list so plotting later is easy.
+```{r, echo = FALSE}
+genus_levels <- do_df_bleed_raw %>%
+  distinct(phylum_name, order_name, family_name, genus_name) %>%
+  arrange(phylum_name, order_name, family_name, genus_name) %>%
+  pull(genus_name)
+
+do_df_bleed_raw <- do_df_bleed_raw %>%
+  mutate(genus_name = factor(genus_name, levels = genus_levels, ordered = TRUE))
+
+
+# Now taxa selectino part. You only want taxa which will be in your final filtered df.
+
+full_taxa_list <- levels(as.factor(do_df_bleed$genus_name))
+write.csv(full_taxa_list, "output/full_taxa_list.csv")
+# add an identifier so you see core and depth. and keep only genera that are in filtered df
+do_df_bleed_raw <- do_df_bleed_raw %>%
+  filter(genus_name %in% full_taxa_list) %>%
+  ungroup() %>%
+  group_by(core, depth) %>%
+  mutate(identifier = paste(core, depth, sep = "_")) %>%
+  ungroup()
+
+```
+
+--------------------------------------------------------------------------------------
+###  0.1 Order check
+If genera match to two orders this is bug, so we check this first. Flag if multiple order
+
+```{r, echo = FALSE}
+# genus order lookup
+genus_order <- do_df_bleed_raw %>%
+  select(genus_name, order_name) %>%
+  distinct()
+
+# now check if each genus maps to one order
+bad_map <- genus_order %>%
+  count(genus_name) %>%
+  filter(n > 1)
+
+if (nrow(bad_map) > 0) {
+  stop("Some genera map to more than one order, check before proceeding")
+}
+
+```
+--------------------------------------------------------------------------------------
+## 1 & 2 Make wide community matrix AND Pairwise Pearson test
+We'll do this as a function and then run the function over our list of cores within the main df. This is done in a nested loop. This is basically steps 1 (make wide community matrix) and step 2 (pairiwse pearson test) from Zoë's script but set under a loop so we do it for each core in our df. 
+```{r, echo = FALSE}
+bleedover_correlation <- function(dat) {
+  # dat = data for one core
+  comm_wide <- dat %>%
+    group_by(identifier, genus_name) %>%
+    summarise(genus_count_assembly = sum(genus_count_assembly), .groups = "drop") %>%
+    pivot_wider(names_from = genus_name, values_from = genus_count_assembly, values_fill = 0)
+  
+  comm_mat <- comm_wide %>% select(-identifier) %>% as.matrix()
+  genera <- colnames(comm_mat)
+  
+  if (ncol(comm_mat) < 2) return(NULL)  # if nog enough genera present to correlate
+  
+  results_list <- list() # this is a list which stores one comparison (genus 1 vs 2 f.e.) and stores r, r2 and p_value within one row. The whole for i and for j is just to check each combination once. 
+  k <- 1 
+  for (i in 1:(ncol(comm_mat) - 1)) {
+    for (j in (i + 1):ncol(comm_mat)) {
+      test <- cor.test(comm_mat[, i], comm_mat[, j], method = "pearson")
+      r <- unname(test$estimate) 
+      results_list[[k]] <- data.frame(
+        genus_1 = genera[i], genus_2 = genera[j],
+        r = r, r2 = r^2, p_value = test$p.value
+      )
+      k <- k + 1
+    }
+  }
+  bind_rows(results_list) %>%
+    mutate(p_adj = p.adjust(p_value, method = "BH"))
+}
+
+# now loop it over each core in our df
+bleedover_results <- list()
+for (a_core in unique(do_df_bleed_raw$core)) {
+  dat_core <- do_df_bleed_raw %>%
+    filter(core == a_core) %>%
+    mutate(identifier = paste(depth, core, sep = "_"))
+  
+  bleedover_results[[a_core]] <- bleedover_correlation(dat_core)
+}
+
+view(bleedover_results[[1]])
+
+```
+
+--------------------------------------------------------------------------------------
+## 3 Add order info and filter > 0.8 R^2
+Idea is to add order information and pull the pairs which have higher than 0.8 r2. From this we can make a list of suss taxa that are above 0.8 r2 AND have same order. 
+We again do this in a loop since we got a list, not a separate df. 
+```{r, echo = FALSE}
+
+strong_same_order_list <- list()
+
+for (a_core in names(bleedover_results)) {
+  res <- bleedover_results[[a_core]]
+  
+  if(is.null(res)) next # empty entry gets skipped
+  
+  strong_same_order_list[[a_core]] <- res %>%
+    left_join(genus_order, by = c("genus_1" = "genus_name")) %>%
+    rename(order_1 = order_name) %>%
+    left_join(genus_order, by = c("genus_2" = "genus_name")) %>%
+    rename(order_2 = order_name) %>%
+    filter(r2 > 0.8, order_1 == order_2) %>%
+    arrange(desc(r2)) %>%
+    mutate(core = a_core, .before = 1)   # <- add core column, put it first
+}
+
+view(strong_same_order_list[[3]])
+```
+
+---------------------------------------------------------------------------------------
+## 4 Now plot the combo's per core in seperate pdfs. We use Zoë's code but loop it since we have list of results, not seperate per core. 
+```{r, echo = FALSE}
+
+plot_pair <- function(dat_wide, genus1, genus2, r2, p_value, p_adj, order_name = NA_character_) {
+  dfp <- dat_wide %>%
+    transmute(
+      identifier = identifier,
+      x = .data[[genus1]],
+      y = .data[[genus2]]
+    )
+  
+  ggplot(dfp, aes(x = x, y = y)) +
+    geom_point(alpha = 0.8) +
+    geom_smooth(method = "lm", se = TRUE) +
+    theme_classic() +
+    labs(
+      x = genus1,
+      y = genus2,
+      title = paste0(genus1, " vs ", genus2,
+                     if (!is.na(order_name)) paste0("  (", order_name, ")") else "")
+    ) +
+    annotate(
+      "text",
+      x = Inf, y = Inf,
+      hjust = 1.05, vjust = 1.2,
+      label = sprintf("R² = %.3f\np = %.2g\np_adj = %.2g", r2, p_value, p_adj)
+    )
+}
+
+# loop over cores, one PDF per core
+for (a_core in names(strong_same_order_list)) {
+  
+  pairs_to_plot <- strong_same_order_list[[a_core]]
+  
+  if (is.null(pairs_to_plot) || nrow(pairs_to_plot) == 0) next  # nothing flagged for this core
+  
+  # rebuild comm_wide for this core (needed for the raw x/y values to plot)
+  dat_core <- do_df_bleed_raw %>%
+    filter(core == a_core) %>%
+    mutate(identifier = paste(depth, core, sep = "_"))
+  
+  comm_wide <- dat_core %>%
+    group_by(identifier, genus_name) %>%
+    summarise(genus_count_assembly = sum(genus_count_assembly), .groups = "drop") %>%
+    pivot_wider(names_from = genus_name, values_from = genus_count_assembly, values_fill = 0)
+  
+  clean_name <- gsub("[ /]", "_", a_core)
+  pdf(paste0("output/flagged_pairs_", clean_name, "_0.8.pdf"), width = 7, height = 6)
+  
+  for (i in seq_len(nrow(pairs_to_plot))) {
+    p <- plot_pair(
+      dat_wide  = comm_wide,
+      genus1    = pairs_to_plot$genus_1[i],
+      genus2    = pairs_to_plot$genus_2[i],
+      r2        = pairs_to_plot$r2[i],
+      p_value   = pairs_to_plot$p_value[i],
+      p_adj     = pairs_to_plot$p_adj[i],
+      order_name = pairs_to_plot$order_1[i]
+    )
+    print(p)
+  }
+  
+  dev.off()
+}
+```
+------------------------------------------------------------
+# Determine actual bleedovers 
+Now based on the plots we determine which ones we classify as actual bleedovers. 
+
+------------------------------------------------------------
+# Remove true Aquatics
+We don't want interference from what is growing in the lake. So we'll remove anything that grows submerged or floating. And we'll combine this with the bleedovers we identify from PDFs as one list so we can easily remove it before the analysis. 
+```{r, echo = FALSE}
+ #1. Aquatics list - same across all cores
+aquatics <- c("Myriophyllum", "Nuphar", "Potamogeton", "Stuckenia")
+
+# 2. Empty bleedover list, one slot per core, ready to fill in manually
+bleedover_taxa <- setNames(
+  vector("list", length(unique(do_df_bleed_raw$core))),
+  unique(do_df_bleed_raw$core)
+)
+# here we fill in our bleedovers, they're empty for now
+bleedover_taxa[["DOJ 1/24 center"]] <- c()
+bleedover_taxa[["DOJ DEL 3/24/A"]]  <- c()
+bleedover_taxa[["DOJ DEL 4/24/B"]]  <- c() 
+
+```

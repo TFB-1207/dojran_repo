@@ -43,7 +43,7 @@ Our data frame is already linked to age_depth model and simplified in Do_seq_pre
 ```{r, echo = FALSE}
 # select phyla of interest _bo is bleed-over
 # This df already is filtered for low read counts
-do_df_bleed <- do_df_fm_gs %>%
+do_df_bleed <- do_la_fm_gs_clean %>%
   ungroup() %>%
   filter(phylum_name == "Streptophyta",
          str_detect(core, "DOJ")) %>%
@@ -52,7 +52,7 @@ do_df_bleed <- do_df_fm_gs %>%
          genus_count_assembly)  # only keep relevant colums
 
 # we also make a df without filtering for the low read counts
-do_df_bleed_raw <- do_df_raw %>%
+do_df_bleed_raw <- do_df_la_clean %>%
   ungroup() %>%
   group_by(core, depth, genus_name) %>%
   select(core, depth, age_mean, phylum_name, order_name, family_name, genus_name, taxa_name, genus_count_assembly) %>%
@@ -256,24 +256,129 @@ for (a_core in names(strong_same_order_list)) {
 }
 ```
 ------------------------------------------------------------
-# Determine actual bleedovers 
-Now based on the plots we determine which ones we classify as actual bleedovers. 
+------------------------------------------------------------------------------------------------------------------
+# Remove exotics
+We also want to flag genera which are not native to our area. These could either be bleedover, so the native taxa does not have a good reference genome resulting in our reads mapping to the exotic assembly which does have good coverage (f.e.). Or it could be contamination. For contamination we should expect the deamination to differ from our 'normal' deamination. 
+First we find any exotic genera in our df using WCVP dtabase, this is already made in our Do_seq_pre_pro script. 
+
+```{r, echo = FALSE}
+do_native_taxa <- unique(do_wcvp_native$genus)
+# problem, wcvp only does vascualr plants, so our mosses are also being flagged. For now just manually keep mosses in
+mosses <- c("Sphagnum", "Polytrichum", "Grimmia", "Hypnum", "Anthoceros")
+
+# match with genera in our df, single out exotics
+do_exotic_candidates <- do_df_bleed_raw %>%
+  distinct(genus_name) %>%
+  filter(!genus_name %in% do_native_taxa) %>%
+  filter(!genus_name %in% mosses)
+
+
+write_csv(do_exotic_taxa, "output/do_exotic_taxa.csv")
+```
+
+## Add deamination scores
+To see if this is likely a real cultivar brought in at the time or contamination we check their deamination scores based on the z-score made in the do_seq_deam_outlier script. 
+```{r, echo = FALSE}
+do_exotic_taxa <- do_la_deam_long %>%
+  filter(genus_name %in% do_exotic_candidates$genus_name) %>%
+  select(core, depth, identifier, genus_name, end, frac, z_w, outlier, genus_count_assembly) %>%
+  arrange(core, depth, genus_name)
+
+view(do_exotic_taxa)
+```
+
+------------------------------------------------------------------------------------------------------------------
+# Merge exotics with bleedover correlations
+An exotic genus that also correlates strongly with a native genus in the same order is good evidence it's a reference-mapping artifact rather than a real cultivar. We check, per core, which exotic candidates also show up in that core's flagged same-order pairs, and add those to exotic_bleedover_df. From this you can see what is exotic and from which taxa it is likely bleedover. 
+
+```{r, echo = FALSE}
+# for each core, find exotic candidates that appear in a flagged same-order pair,
+# and record which genus they're correlated with
+exotic_bleedover_list <- list()
+
+for (a_core in names(strong_same_order_list)) {
+  
+  pairs <- strong_same_order_list[[a_core]]
+  if (is.null(pairs) || nrow(pairs) == 0) next
+  
+  # long format: one row per genus per pair, so each genus's "partner" is easy to grab
+  pairs_long <- bind_rows(
+    pairs %>% transmute(genus = genus_1, related_genus = genus_2, r2, p_adj),
+    pairs %>% transmute(genus = genus_2, related_genus = genus_1, r2, p_adj)
+  )
+  
+  exotic_bleedover_list[[a_core]] <- pairs_long %>%
+    filter(genus %in% do_exotic_candidates$genus_name) %>%
+    transmute(
+      core           = a_core,
+      bleedover_genus = genus,
+      related_genus,
+      r2,
+      p_adj,
+      source = "exotic + bleedover correlated"
+    )
+}
+
+exotic_bleedover_df <- bind_rows(exotic_bleedover_list)
+
+exotic_bleedover_df
+```
+
 
 ------------------------------------------------------------
-# Remove true Aquatics
-We don't want interference from what is growing in the lake. So we'll remove anything that grows submerged or floating. And we'll combine this with the bleedovers we identify from PDFs as one list so we can easily remove it before the analysis. 
-```{r, echo = FALSE}
- #1. Aquatics list - same across all cores
-aquatics <- c("Myriophyllum", "Nuphar", "Potamogeton", "Stuckenia")
 
+# Determine actual bleedovers 
+Now based on the plots we determine which ones we classify as actual bleedovers. BUT still have to decide if we throw these reads out or add them to the related genera? That's probably more fair. 
+## Bleedovers
+
+```{r, echo = FALSE}
 # 2. Empty bleedover list, one slot per core, ready to fill in manually
 bleedover_taxa <- setNames(
   vector("list", length(unique(do_df_bleed_raw$core))),
   unique(do_df_bleed_raw$core)
 )
 # here we fill in our bleedovers, they're empty for now
-bleedover_taxa[["DOJ 1/24 center"]] <- c()
-bleedover_taxa[["DOJ DEL 3/24/A"]]  <- c()
-bleedover_taxa[["DOJ DEL 4/24/B"]]  <- c() 
+bleedover_taxa[["DOJ 1/24 center"]] <- c("Leonotis")
+bleedover_taxa[["DOJ DEL 3/24/A"]]  <- c("Brainea", "Leonotis")
+bleedover_taxa[["DOJ DEL 4/24/B"]]  <- c("Brainea", "Leonotis") 
 
 ```
+# This is the final step where we make the lists from bleedover, aquatics, deamination and exotics to remove from our dataframe for analysis
+
+## Remove true Aquatics
+We don't want interference from what is growing in the lake. So we'll remove anything that grows submerged or floating. And we'll combine this with the bleedovers we identify from PDFs as one list so we can easily remove it before the analysis. 
+```{r, echo = FALSE}
+ #. Aquatics list - same across all cores
+aquatics <- c("Myriophyllum", "Nuphar", "Potamogeton", "Stuckenia")
+```
+
+-----------------------------------------------------------------------------------------------------------------------------
+# Taxa to Remove
+Now final part is to remove our bleedovers, contamination based on deamination scores and our aquatics
+
+```{r,echo = FALSE}
+
+# build a per-core vector of genera to remove: bleedover_taxa genera + aquatics (every core)
+taxa_to_remove <- map(bleedover_taxa, ~ unique(c(.x, aquatics)))
+
+
+taxa_to_remove
+
+# and remove them for the set we'll use for the classification step
+
+do_df_class_list <- list()
+
+for (a_core in unique(do_df_bleed$core)) {
+  
+  dat_core <- do_la_fm_gs_clean %>%
+    filter(core == a_core)
+  
+  remove_list <- taxa_to_remove[[a_core]]   # NULL if this core has no entry in the list
+  
+  do_df_class_list[[a_core]] <- dat_core %>%
+    filter(!genus_name %in% remove_list)
+}
+
+do_df_class <- bind_rows(do_df_class_list)
+```
+

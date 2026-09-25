@@ -101,14 +101,9 @@ for (a_core in unique(do_la_deam_long$core)) {
 plots
 ```
 
-# ---------------- save outliers ----------------
-We only save outliers with negative z-score, since they have lower deamination than the 'normal'. save as .csv file to later call upon if we need to remove them for further analysis 
-```{r, echo = FALSE}
-do_la_outliers <- do_la_deam_long %>%
-  filter(z_w < -2.99)
-write.csv(do_la_outliers, "output/outliers_DOJ.csv", row.names = FALSE)
 
-```
+
+
 
 # ---------------------- Ridge Plots
 now we make the ridge plots for a visual inspection of the deam distribution curves. shows if damage is consistent over depths, long tails towards low values indicate contamination, shows shift in deam over depth. Tells us if our z-score thing is workable since our approach works best if we have bell-curves. 
@@ -143,5 +138,52 @@ for (a_core in unique(do_la_deam_long$core)) {
 }
 
 ridge_plots
+```
+
+# ---------------- save outliers ----------------
+We only save outliers with negative z-score, since they have lower deamination than the 'normal'. save as .csv file to later call upon if we need to remove them for further analysis. We also check how many time that genus is flagged as outlier over the whole core. Also we remove the ones we now suspect as contamination (outlier AND frac < 0.1) we remove these from do_df_fm_gs and do_df_raw (creaitng the clean variants) to be used in our bleedover script
+
+```{r, echo = FALSE}
+# all outliers based on our criteria
+do_la_outliers <- do_la_deam_long %>%
+  filter(z_w < -2.99)
+write.csv(do_la_outliers, "output/outliers_DOJ.csv", row.names = FALSE)
+
+
+
+# also check how many times this genus is an outlier and how many times not. So maybe it is just variable in its deamination. f.e. if it is showing up as outlier 1/14 depths than likely that is just variance in deamination. If it shows up as outlier consistantly, and especially at lower depths, then this is likely contamination. 
+# total depths this genus is present at in this core, and how many of those are outliers
+genus_flag_rate <- do_la_deam_long %>%
+  distinct(core, genus_name, depth, outlier) %>%     # one row per core-genus-depth-outlier status
+  group_by(core, genus_name) %>%
+  summarise(
+    n_depths_total   = n_distinct(depth),
+    n_depths_flagged = n_distinct(depth[outlier == TRUE]),
+    frac_flagged     = n_depths_flagged / n_depths_total,
+    .groups = "drop"
+  )
+
+# keep do_la_outliers exactly as-is, just add the fraction column
+do_la_outliers_check <- do_la_outliers %>%
+  left_join(genus_flag_rate, by = c("core", "genus_name"))
+
+do_la_outliers_check
+
+
+# for now we keep it simple and remove only that with less than 0.1 deamination of our flagged outliers. 
+deam_outliers_to_remove <- do_la_outliers %>%
+  filter(frac < 0.10) %>%
+  distinct(core, depth, genus_name)
+
+deam_outliers_to_remove
+
+do_df_la_clean <- do_df_raw %>%
+  filter(str_detect(core, "DOJ")) %>%
+  anti_join(deam_outliers_to_remove, by = c("core", "depth", "genus_name"))
+
+do_la_fm_gs_clean <- do_df_fm_gs %>%
+  filter(str_detect(core, "DOJ"))  %>%
+  anti_join(deam_outliers_to_remove, by = c("core", "depth", "genus_name"))
+
 ```
 
